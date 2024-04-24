@@ -12,4 +12,4 @@ The retriver would be able to convert the query into embeddings and check agains
 related vectors then obtain the relevant chunks.
 
 These chunks are then used as context and send along with the user query merged in the prompt template to the LLM.
-I have tested on QuantFactory - Meta Llama 3 Instruct 7B Q5_K_M.guff model. Result is satisfactory.
+I have tested on QuantFactory - Meta Llama 3 Instruct 7B Q5_K_M.guff model. Result is satisfactory for the simple document repository I tested on but the quality may suffer on complicated documents. 

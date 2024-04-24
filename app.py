@@ -1,0 +1,209 @@
+# Chat with your documents using LLM
+#
+# I tried both LM Studio and Ollama as local backend LLMs to LangChain
+# Pros and cons of using local LLMs
+# Pros: 
+# - Your data doesn't leak out to the internet
+# - You save some money by not subscribing to OpenAI chatgpt API service
+# Cons:
+# - Slower inference time
+
+# I prefer LM Studio since has a wonderful interface for me to chat, and 
+# I can also run it as a API backend and it supports the OpenAI API protocol
+
+# Different LLMs models may behave differently to the prompt template
+# So you may have to adjust the prompt as necessary
+# Refer to documentation related with the model for more details
+
+from langchain.chains import RetrievalQA
+from langchain.callbacks.streaming_stdout import StreamingStdOutCallbackHandler
+from langchain.callbacks.manager import CallbackManager
+from langchain_community.llms import Ollama
+from langchain_community.llms.openai import OpenAI
+from langchain_community.embeddings.sentence_transformer import SentenceTransformerEmbeddings
+from langchain_community.vectorstores import Chroma
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain_community.document_loaders import TextLoader, BSHTMLLoader
+from langchain.prompts import PromptTemplate
+import streamlit as st
+import os
+
+DOC_FOLDER = r".\diary"
+FILE_EXT = ".md"
+
+# configuration of the LLM
+# todo: import this from a json file
+RAG_CONFIGS = [
+    {   "name":"remote",
+        "base_url":"http://192.168.1.66:1234/v1",   # this is the endpoint of a MacBook Pro that runs LM Studio remotely
+        "model":"ollama",
+        "api_key":"123"
+    },
+    {   "name":"local_openai",
+        "base_url":"http://127.0.0.1:1234/v1",  # this is the endpoint of my Intel based Window Notbook that runs LM Studio locally
+        "model":"ollama",
+        "api_key":"123"
+    },
+    {
+        "name":"local_ollama",
+        "base_url":"http://127.0.0.1:11434",    # this is the endpoint of my Intel based Window Notbook that runs Ollama locally
+        "model":"mistral",
+    }
+]
+
+MODE = "local_openai"  #select the API endpoint of the local LLM
+CONFIG = [c for c in RAG_CONFIGS if c["name"] == MODE][0]
+
+
+# upserts docs to the chroma db that referenced the documents
+# by default it looks for the .\diary folder on the current directory
+# it skips files that have already been added by using the file path as unqiue identifier (id) in chroma
+# returns the unique ids and splitted docs 
+def split_docs(vectorstore, path=DOC_FOLDER, file_ext=FILE_EXT):
+    
+    # get list of unique ids of docs from chroma db
+    ids = vectorstore.get()["ids"]
+    # Add the documents to the vectorstore after splitting them into chunks
+    # Initialize text splitter
+    text_splitter = RecursiveCharacterTextSplitter(
+        chunk_size=1000,
+        chunk_overlap=20,
+        length_function=len
+    )
+
+    # Iterate through all subdirectories
+    ret_docs = []
+    ret_ids = []
+    for root, dirs, files in os.walk(path):
+        for file in files:
+            if file.endswith(file_ext):
+                filename = os.path.join(root,file)
+                # print(filename)
+                # only include files that are not found in chroma yet
+                found = [f for f in ids if filename in f]
+                print("found", found)
+                # found = find_ids(filename, ids)
+                if found == []:
+                    # print(f"cannot find {filename}")
+                    try:
+                        # loader = BSHTMLLoader(filename)     # use beautiful soup loader if using .html
+                        # if os.path.exists(filename): 
+                        #     print(f"found {filename}")
+                        loader = TextLoader(filename, autodetect_encoding=True)
+                        doc = loader.load()
+                    except UnicodeDecodeError as e:
+                        print(f"Error decoding the file: {e}")
+
+                    i = 0
+                    chunks = text_splitter.split_documents(doc)
+                    print("number of chunks: ",chunks.__len__())
+                    print(chunks)
+                    for chunk in chunks:
+                        i += 1
+                        ret_docs.append(chunk)
+                        chunk_id = f"{filename} ({str(i)})"
+                        ret_ids.append(chunk_id)
+                        print(f"added {chunk_id}")
+                else:
+                    print(f"skipped, found {filename}")
+    return ret_docs, ret_ids
+
+
+def main():
+
+    st.title("Chatbot")
+
+    # parser = PydanticOutputParser(pydantic_object=Response)
+    
+    loaded = st.session_state.get("loaded", False)
+    if not loaded:
+        ## Add document along with unique IDs so we don't include the same documents again
+        embedding = SentenceTransformerEmbeddings(model_name="all-MiniLM-L6-v2")
+        vectorstore = Chroma(persist_directory=os.path.join(DOC_FOLDER, "db"),
+                            embedding_function=embedding)             
+
+        docs = []
+        ids = []
+        docs, ids = split_docs(vectorstore)
+        if not ids == []:
+            vectorstore = vectorstore.from_documents(documents=docs, embedding=embedding, ids=ids, persist_directory=os.path.join(DOC_FOLDER, "db"))
+            vectorstore.persist()
+
+        retriever = vectorstore.as_retriever()
+        st.session_state["retriever"] = retriever
+        # test_retrival = vectorstore.similarity_search_with_score("Who are my family?", 3)
+        # print(f"test vector retrival: {test_retrival}")
+
+        if MODE == "local":
+            llm = Ollama(
+                base_url=CONFIG["base_url"],
+                model=CONFIG["model"],
+                temperature=0,
+                verbose=True,
+                callback_manager=CallbackManager(
+                    [StreamingStdOutCallbackHandler()]),
+                )
+        else:
+            llm = OpenAI(
+                base_url=CONFIG["base_url"],
+                model=CONFIG["model"],
+                openai_api_key=CONFIG["api_key"],
+                temperature=0.7,
+                verbose=True,
+                callback_manager=CallbackManager(
+                    [StreamingStdOutCallbackHandler()]),
+                )
+
+
+        template = """You are a helpful and chatty personal assistant. Answer the following question using the context politely. 
+        In your answer, do not say it is based on the context and do not include any additional notes.
+        ====CONTEXT====
+        Context: {context}
+        ====QUESTION====
+        User: {question}
+        =====ANSWER====
+        Assistant: """
+
+        prompt = PromptTemplate(
+                template=template,
+                input_variables=["context", "question"],
+                )
+        qa_chain = RetrievalQA.from_chain_type(
+                    llm=llm,
+                    chain_type='stuff',
+                    retriever=st.session_state["retriever"],
+                    verbose=True,
+                    chain_type_kwargs={
+                        "verbose": True,
+                        "prompt": prompt,
+                    })
+        
+        st.session_state["qa_chain"] = qa_chain
+        st.session_state["loaded"] = True
+
+    # Store LLM generated responses
+    if "messages" not in st.session_state.keys():
+        st.session_state.messages = [{"role": "assistant", "content": "How may I help you?"}]
+
+    # Display chat messages
+    for message in st.session_state.messages:
+        with st.chat_message(message["role"]):
+            st.write(message["content"])
+
+    if user_input := st.chat_input("You:", key="user_input"):
+        st.session_state.messages.append({"role": "user", "content": user_input})
+        with st.chat_message("user"):
+            st.write(user_input)
+
+    if st.session_state.messages[-1]["role"] != "assistant":
+        with st.chat_message("assistant"):
+            with st.spinner("Thinking..."):
+                response = st.session_state["qa_chain"](user_input) 
+                print(response)
+                st.write(response['result']) 
+        message = {"role": "assistant", "content": response['result']}
+        st.session_state.messages.append(message)            
+
+if __name__ == "__main__":
+    main()
+

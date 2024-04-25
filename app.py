@@ -198,15 +198,15 @@ def main():
                 )
         qa_chain = RetrievalQA.from_chain_type(
                     llm=llm,
-                    chain_type="refine",
-                    # chain_type='stuff',
+                    # chain_type="refine",
+                    chain_type='stuff',
                     # chain_type="map_reduce",                    
                     # chain_type="map_rerank",                    
                     retriever=st.session_state["retriever"],
                     verbose=True,
-                    # chain_type_kwargs={
-                    #     "verbose": True,
-                    #     "prompt": prompt,}
+                    chain_type_kwargs={
+                        "verbose": True,
+                        "prompt": prompt,}
         )
         
         st.session_state["qa_chain"] = qa_chain

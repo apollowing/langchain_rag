@@ -1,3 +1,17 @@
+
+# Trying out LangChain with agents and tools
+# Some tools I can think of
+# - Tool to control home automation - turn on or off fan, control speed
+# - Tool to give spelling test for didi
+# = Tool to search web
+# - agent that can understand if and use the correct tool
+
+
+
+
+
+
+
 # Chat with your documents using LLM
 #
 # I tried both LM Studio and Ollama as local backend LLMs to LangChain
@@ -19,16 +33,20 @@
 # - https://medium.com/@onkarmishra/using-langchain-for-question-answering-on-own-data-3af0a82789ed
 # - https://medium.com/ai-in-plain-english/using-langchain-chains-and-agents-for-llm-application-development-d538f6c70bc6
 
+from langchain import hub
 from langchain.chains import RetrievalQA
 from langchain.callbacks.streaming_stdout import StreamingStdOutCallbackHandler
 from langchain.callbacks.manager import CallbackManager
 from langchain_community.llms import Ollama
+from langchain_community.chat_models import ChatOllama
 from langchain_openai import OpenAI
 from langchain_community.embeddings.sentence_transformer import SentenceTransformerEmbeddings
 from langchain_community.vectorstores import Chroma
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_community.document_loaders import TextLoader, BSHTMLLoader, PyPDFLoader
 from langchain.prompts import PromptTemplate
+from langchain.agents import initialize_agent, AgentType, tool, AgentExecutor, create_tool_calling_agent
+from datetime import date
 import streamlit as st
 import os
 
@@ -55,12 +73,12 @@ RAG_CONFIGS = [
     }
 ]
 
-MODE = "local_openai"  #select the API endpoint of the local LLM
+MODE = "local_ollama"  #select the API endpoint of the local LLM
 CONFIG = [c for c in RAG_CONFIGS if c["name"] == MODE][0]
 
 
+
 # upserts docs to the chroma db that referenced the documents
-# by default it looks for the .\diary folder on the current directory
 # it skips files that have already been added by using the file path as unqiue identifier (id) in chroma
 # returns the unique ids and splitted docs 
 def split_docs(vectorstore, path=DOC_FOLDER, file_ext=FILE_EXT):
@@ -125,6 +143,51 @@ def split_docs(vectorstore, path=DOC_FOLDER, file_ext=FILE_EXT):
 
 def main():
 
+    @tool
+    def time(text: str) -> str:
+        """Returns todays date, use this for any \
+        questions related to knowing todays date. \
+        The input should always be an empty string, \
+        and this function will always return todays \
+        date - any date mathematics should occur \
+        outside this function."""
+        return str(date.today())
+
+
+    @tool
+    def ask_docs(question: str) -> str:
+        """Ask questions about the documents."""
+
+        template = """You are a helpful and chatty personal assistant. Answer the following question using the context politely. 
+        In your answer, do not say it is based on the context and do not include any additional notes.
+        ====CONTEXT====
+        Context: {context}
+        ====QUESTION====
+        User: {question}
+        =====ANSWER====
+        Assistant: """
+
+        prompt = PromptTemplate(
+                template=template,
+                input_variables=["context", "question"],
+                )
+        qa_chain = RetrievalQA.from_chain_type(
+                    llm=llm,
+                    # chain_type="refine",
+                    chain_type='stuff',
+                    # chain_type="map_reduce",                    
+                    # chain_type="map_rerank",                    
+                    retriever=st.session_state["retriever"],
+                    verbose=True,
+                    chain_type_kwargs={
+                        "verbose": True,
+                        "prompt": prompt,}
+        )
+        answer = qa_chain(question)["result"]
+        return answer
+
+    tools = [time, ask_docs]
+
     st.title("Chatbot")
 
     # parser = PydanticOutputParser(pydantic_object=Response)
@@ -162,54 +225,60 @@ def main():
         # test_retrival = vectorstore.similarity_search_with_score("Who are my family?", 3)
         # print(f"test vector retrival: {test_retrival}")
 
-        if MODE == "local_ollama":
-            llm = Ollama(
-                base_url=CONFIG["base_url"],
-                model=CONFIG["model"],
-                temperature=0,
-                verbose=True,
-                callback_manager=CallbackManager(
-                    [StreamingStdOutCallbackHandler()]),
-                )
-        else:
-            llm = OpenAI(
-                base_url=CONFIG["base_url"],
-                model=CONFIG["model"],
-                openai_api_key=CONFIG["api_key"],
-                temperature=0,
-                verbose=True,
-                callback_manager=CallbackManager(
-                    [StreamingStdOutCallbackHandler()]),
-                )
+        llm = ChatOllama(model="llama3", temperature=0)
 
 
-        template = """You are a helpful and chatty personal assistant. Answer the following question using the context politely. 
-        In your answer, do not say it is based on the context and do not include any additional notes.
-        ====CONTEXT====
-        Context: {context}
-        ====QUESTION====
-        User: {question}
-        =====ANSWER====
-        Assistant: """
+        # if MODE == "local_ollama":
+        #     llm = Ollama(
+        #         base_url=CONFIG["base_url"],
+        #         model=CONFIG["model"],
+        #         temperature=0,
+        #         verbose=True,
+        #         callback_manager=CallbackManager(
+        #             [StreamingStdOutCallbackHandler()]),
+        #         )
+        # else:
+        #     llm = OpenAI(
+        #         base_url=CONFIG["base_url"],
+        #         model=CONFIG["model"],
+        #         openai_api_key=CONFIG["api_key"],
+        #         temperature=0,
+        #         verbose=True,
+        #         callback_manager=CallbackManager(
+        #             [StreamingStdOutCallbackHandler()]),
+        #         )
 
-        prompt = PromptTemplate(
-                template=template,
-                input_variables=["context", "question"],
-                )
-        qa_chain = RetrievalQA.from_chain_type(
-                    llm=llm,
-                    # chain_type="refine",
-                    chain_type='stuff',
-                    # chain_type="map_reduce",                    
-                    # chain_type="map_rerank",                    
-                    retriever=st.session_state["retriever"],
-                    verbose=True,
-                    chain_type_kwargs={
-                        "verbose": True,
-                        "prompt": prompt,}
+
+        # Get the prompt to use - you can modify this!
+        prompt = hub.pull("hwchase17/openai-tools-agent")
+        prompt.pretty_print()
+
+        # Construct the tool calling agent
+        agent = create_tool_calling_agent(llm, tools, prompt)
+
+        # Create an agent executor by passing in the agent and tools
+        agent_executor = AgentExecutor(agent=agent, tools=tools, verbose=True)
+
+
+
+        # # Initialize the agent
+        # agent= initialize_agent(
+        #     [time], 
+        #     llm, 
+        #     agent=AgentType.CHAT_ZERO_SHOT_REACT_DESCRIPTION,
+        #     handle_parsing_errors=True,
+        #     verbose = True)
+
+        # Call the agent
+        response = agent_executor.invoke(
+            {
+                "input": "Take 3 to the fifth power and multiply that by the sum of twelve and three, then square the whole result"
+            }
         )
-        
-        st.session_state["qa_chain"] = qa_chain
+        print(response["output"])
+
+        # st.session_state["qa_chain"] = qa_chain
+        st.session_state["agent"] = agent_executor
         st.session_state["loaded"] = True
 
     # Store LLM generated responses
@@ -229,7 +298,8 @@ def main():
     if st.session_state.messages[-1]["role"] != "assistant":
         with st.chat_message("assistant"):
             with st.spinner("Thinking..."):
-                response = st.session_state["qa_chain"](user_input) 
+                response = st.session_state["agent"].invoke(
+                    {"input": user_input}) 
                 print(response)
                 st.write(response['result']) 
         message = {"role": "assistant", "content": response['result']}
